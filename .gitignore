@@ -1,0 +1,8 @@
+# Rust build artifacts
+/target
+
+# Capture data is large (several GB) and not part of the source tree
+/data
+
+# tooling scratch dir
+/.v2c

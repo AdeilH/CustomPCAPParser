@@ -1,0 +1,10 @@
+[package]
+name = "pcap-parser"
+version = "0.1.0"
+edition = "2021"
+description = "PCAP parser with built-in zstd decompression and XDP packet parsing. Standard library only, no external crates."
+
+[dependencies]
+
+[profile.release]
+debug = true
