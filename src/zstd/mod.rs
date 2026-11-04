@@ -1,7 +1,8 @@
 //! From-scratch zstd decompression, following RFC 8878.
 
+pub mod bitreader;
 pub mod xxhash;
-// bitreader, fse, huffman, frame/block decode follow in later steps.
+// fse, huffman, frame/block decode follow in later steps.
 
 /// Errors produced while decoding a zstd stream.
 #[derive(Debug)]
