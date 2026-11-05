@@ -1,21 +1,44 @@
-//! pcap-parser: decompresses zstd-compressed pcap captures and parses them.
-//!
-//! Built step by step on top of the standard library only; see README.md for
-//! the roadmap.
+//! pcap-parser CLI: decompresses zstd-compressed pcap captures and parses
+//! them. Built step by step on the standard library only; see README.md.
 
-#![forbid(unsafe_code)]
-
-mod zstd;
-
+use pcap_parser::zstd::frame;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 1 {
-        eprintln!("usage: pcap-parser <capture.pcap.zst>");
+    if args.is_empty() {
+        eprintln!("usage: pcap-parser <capture.pcap.zst> [output]");
         return ExitCode::from(2);
     }
     let path = &args[0];
-    println!("pcap-parser: skeleton ({path})");
+
+    let raw = match std::fs::read(path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let decompressed = match frame::decompress(&raw) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: zstd decompression failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let elapsed = start.elapsed();
+
+    println!("decompressed {} bytes in {:?}", decompressed.len(), elapsed);
+
+    if let Some(out_path) = args.get(1) {
+        if let Err(e) = std::fs::write(out_path, &decompressed) {
+            eprintln!("error: cannot write {out_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {out_path}");
+    }
+
     ExitCode::SUCCESS
 }
