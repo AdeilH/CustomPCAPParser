@@ -2,8 +2,9 @@
 
 pub mod bitreader;
 pub mod fse;
+pub mod huffman;
 pub mod xxhash;
-// huffman, frame/block decode follow in later steps.
+// frame/block decode follows in a later step.
 
 /// Errors produced while decoding a zstd stream.
 #[derive(Debug)]
