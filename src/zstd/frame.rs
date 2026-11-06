@@ -177,7 +177,7 @@ impl<'a> FrameDecoder<'a> {
     }
 
     /// Largest block payload this frame may produce.
-    fn block_max(&self) -> u64 {
+    pub(crate) fn block_max(&self) -> u64 {
         // Window size bounds block size too (single-segment frames: the
         // content size is the window).
         self.header.window_size.min(BLOCK_MAX_UNCOMPRESSED)

@@ -82,7 +82,7 @@ impl<'a> BitReader<'a> {
 
     /// Like [`read`](Self::read) without consuming.
     pub fn peek(&self, n: u32) -> u64 {
-        debug_assert!((1..=32).contains(&n), "peek supports 1..=32 bits");
+        debug_assert!(n <= 32, "peek supports 0..=32 bits");
         if n == 0 {
             return 0;
         }

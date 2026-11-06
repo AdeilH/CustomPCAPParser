@@ -133,7 +133,6 @@ pub fn read_normalized_counts(
                     break;
                 }
             }
-            previous_was_zero = false;
             if counts.len() > max_symbol + 1 {
                 return Err(ZstdError::Corrupted("FSE table has too many symbols"));
             }
