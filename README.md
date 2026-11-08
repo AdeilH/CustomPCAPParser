@@ -18,13 +18,13 @@ Everything is implemented from scratch, following the relevant specifications:
 Work proceeds step by step, one commit per step:
 
 1. [x] Project skeleton (std-only cargo project)
-2. [ ] zstd: XXH64 checksum
-3. [ ] zstd: reverse bit reader (entropy streams)
-4. [ ] zstd: FSE table description + decoding
-5. [ ] zstd: Huffman tree description + literal decoding
-6. [ ] zstd: frame/block headers, Raw & RLE blocks
-7. [ ] zstd: sequences section + compressed blocks
-8. [ ] zstd: end-to-end decompression, verified against `zstd` CLI + XXH64
+2. [x] zstd: XXH64 checksum
+3. [x] zstd: reverse bit reader (entropy streams)
+4. [x] zstd: FSE table description + decoding
+5. [x] zstd: Huffman tree description + literal decoding
+6. [x] zstd: frame/block headers, Raw & RLE blocks
+7. [x] zstd: sequences section + compressed blocks
+8. [x] zstd: end-to-end decompression, verified against `zstd` CLI + XXH64
 9. [ ] pcap: global header parsing (one capture, `data/`)
 10. [ ] pcap: per-packet record headers
 11. [ ] XDP: packet payload parsing
