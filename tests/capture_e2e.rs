@@ -3,6 +3,7 @@
 //! `data/` holds ~3.8 GB of NYSE Pillar captures and is gitignored, so this
 //! test skips itself when the file is not present (e.g. fresh clone).
 
+use pcap_parser::pcap::{GlobalHeader, LinkType, PcapMagic};
 use pcap_parser::zstd::frame;
 
 const CAPTURE: &str = concat!(
@@ -31,4 +32,11 @@ fn decompresses_real_capture_with_checksum() {
     // Classic pcap magic in the little-endian nanosecond variant
     // (0xa1b23c4d stored LE) — sanity-check the start of the capture.
     assert_eq!(&out[..4], &[0x4d, 0x3c, 0xb2, 0xa1]);
+
+    // Global header of this capture.
+    let header = GlobalHeader::parse(&out).expect("global header");
+    assert_eq!(header.magic, PcapMagic::NanosecondsLe);
+    assert_eq!((header.version_major, header.version_minor), (2, 4));
+    assert_eq!(header.snaplen, 262_144);
+    assert_eq!(header.network, LinkType::ETHERNET);
 }

@@ -1,6 +1,7 @@
 //! pcap-parser CLI: decompresses zstd-compressed pcap captures and parses
 //! them. Built step by step on the standard library only; see README.md.
 
+use pcap_parser::pcap::GlobalHeader;
 use pcap_parser::zstd::frame;
 use std::process::ExitCode;
 
@@ -31,6 +32,19 @@ fn main() -> ExitCode {
     let elapsed = start.elapsed();
 
     println!("decompressed {} bytes in {:?}", decompressed.len(), elapsed);
+
+    let header = match GlobalHeader::parse(&decompressed) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: invalid pcap global header: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("pcap global header:");
+    println!("  format:  {}", header.magic);
+    println!("  version: {}.{}", header.version_major, header.version_minor);
+    println!("  snaplen: {} bytes", header.snaplen);
+    println!("  link:    {}", header.network);
 
     if let Some(out_path) = args.get(1) {
         if let Err(e) = std::fs::write(out_path, &decompressed) {
