@@ -143,8 +143,13 @@ print!("{}", parser.summarize());            // end-of-capture report
 - `feeds::parser_by_name(name) -> Option<Box<dyn PacketParser>>` /
   `feeds::PARSER_NAMES` — the registry. Registered today: `"xdp"`,
   `"none"` (a counting-only parser that doubles as the minimal template).
-- `Event` — decoded items; `Event::Xdp(xdp::Message)` today. New feeds add
-  a variant.
+- `Event` — decoded items:
+  - `Event::Xdp(xdp::Message)` — a decoded market-data/control message
+  - `Event::XdpHeartbeat(xdp::Heartbeat)` — heartbeat packets, surfaced as
+    events so replication/logging pipelines see the feed's liveness traffic
+    (channel = UDP destination port, sequence number, publisher timestamp).
+    Heartbeats do not consume sequence numbers (XDP Common Spec §2.2), so
+    gap detection must not treat them as data.
 
 #### The XDP feed (`feeds::xdp`)
 
@@ -184,7 +189,9 @@ Security Status (34), Refresh Header (35, full + short forms); Pillar
 Integrated — Add Order (100), Modify (101), Delete (102), Execution (103),
 Replace (104), Imbalance (105), Add Order Refresh (106), Non-Displayed Trade
 (110). Unknown types pass through as `Message::Other`. `msg_type_name()` and
-`delivery_name()` map the numeric values to spec names.
+`delivery_name()` map the numeric values to spec names. Pre-market captures
+are heartbeat-only; the parser flags that in `summarize()` instead of
+reporting zero events silently.
 
 **Prices** are raw integer numerators per the spec: divide by
 `10^PriceScaleCode` from the symbol's Symbol Index Mapping message

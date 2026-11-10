@@ -64,12 +64,16 @@ impl From<xdp::XdpError> for FeedError {
 pub enum Event<'a> {
     /// A decoded XDP message (NYSE XDP feeds).
     Xdp(xdp::Message<'a>),
+    /// An XDP heartbeat packet (feed liveness traffic; replication
+    /// pipelines log these to reproduce downstream keep-alive behavior).
+    XdpHeartbeat(xdp::Heartbeat),
 }
 
 impl fmt::Display for Event<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Event::Xdp(m) => write!(f, "xdp {m}"),
+            Event::XdpHeartbeat(hb) => write!(f, "xdp {hb}"),
         }
     }
 }

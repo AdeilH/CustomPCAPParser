@@ -91,6 +91,39 @@ fn decompresses_real_capture_with_checksum() {
         heartbeats += 1;
     }
     assert_eq!(heartbeats, count);
+
+    // Through the feed parser, every packet surfaces as a heartbeat EVENT
+    // (replication logs must see the liveness traffic). The events carry
+    // the channel (destination port) and the publisher timestamp. This
+    // capture uses 18 channels (23000-23005 data, 24108-24119 control),
+    // each beating once per second for the ~94 s window.
+    let mut parser = feeds::parser_by_name("xdp").unwrap();
+    parser.begin(&h);
+    let mut hb_events = 0u64;
+    let mut channels = HashMap::new();
+    for rec in h.records(&out) {
+        for ev in parser.parse_packet(rec.unwrap().data).unwrap() {
+            match ev {
+                feeds::Event::XdpHeartbeat(hb) => {
+                    let is_data = (23000..=23005).contains(&hb.dst_port);
+                    let is_control = (24108..=24119).contains(&hb.dst_port);
+                    assert!(is_data || is_control, "unexpected channel {}", hb.dst_port);
+                    // Heartbeats carry their own second: within the window.
+                    assert!(
+                        (1_692_663_600..1_692_663_600 + 120).contains(&hb.send_time),
+                        "send_time {} outside capture window",
+                        hb.send_time
+                    );
+                    *channels.entry(hb.dst_port).or_default() += 1;
+                    hb_events += 1;
+                }
+                feeds::Event::Xdp(_) => panic!("unexpected message in heartbeat-only capture"),
+            }
+        }
+    }
+    assert_eq!(hb_events, count);
+    assert_eq!(channels.len(), 18);
+    assert!(channels.values().all(|n| (90..=96).contains(n)), "{channels:?}");
 }
 
 /// The market-hours capture (13:00-13:10 UTC) carries the full feed:
@@ -196,12 +229,20 @@ fn feed_pipeline_through_trait_object() {
 
     let mut events = 0u64;
     let mut records = 0u64;
+    let mut heartbeat_events = 0u64;
     for rec in header.records(&out) {
-        events += parser.parse_packet(rec.unwrap().data).unwrap().len() as u64;
+        for ev in parser.parse_packet(rec.unwrap().data).unwrap() {
+            if matches!(ev, feeds::Event::XdpHeartbeat(_)) {
+                heartbeat_events += 1;
+            }
+            events += 1;
+        }
         records += 1;
     }
     assert_eq!(records, 112_354);
-    assert_eq!(events, 240_671); // every message surfaces as an event
+    // Every message plus every heartbeat surfaces as an event.
+    assert_eq!(events, 240_671 + 7_451);
+    assert_eq!(heartbeat_events, 7_451);
 
     let summary = parser.summarize();
     assert!(summary.contains("packets:  112354 (0 non-feed frames)"), "{summary}");

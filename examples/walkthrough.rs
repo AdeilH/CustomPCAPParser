@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     parser.begin(&header);
 
     let mut packets = 0u64;
+    let mut heartbeats = 0u64;
     let mut buy_orders = 0u64;
     let mut sell_orders = 0u64;
     let mut orders_shown = 0u32;
@@ -52,7 +53,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rec = rec?;
         packets += 1;
         for ev in parser.parse_packet(rec.data)? {
-            let Event::Xdp(msg) = ev;
+            let msg = match ev {
+                Event::Xdp(msg) => msg,
+                Event::XdpHeartbeat(hb) => {
+                    heartbeats += 1;
+                    continue;
+                }
+            };
             match msg {
                 xdp::Message::SymbolIndexMapping { symbol_index, symbol, .. } => {
                     symbols.insert(symbol_index, symbol.to_string());
@@ -83,8 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Programmatic statistics (public parser fields) -----------------
     println!(
-        "{} packets; orders B/S {}/{}; executed shares {} across {} price levels",
+        "{} packets ({} heartbeats); orders B/S {}/{}; executed shares {} across {} price levels",
         packets,
+        heartbeats,
         buy_orders,
         sell_orders,
         trades.values().sum::<u64>(),

@@ -547,9 +547,21 @@ impl Message<'_> {
     }
 }
 
-/// Convenience: parse a full Ethernet frame down to the XDP layer, when the
-/// packet is IPv4/UDP. Returns the UDP payload (the XDP packet).
-pub fn udp_payload_of(record_data: &[u8]) -> crate::net::Result<&[u8]> {
+/// Transport coordinates of an XDP packet: which channel (multicast group +
+/// ports) it arrived on, plus the payload. Replication and logging need the
+/// channel identity, which the bare payload does not carry.
+#[derive(Debug, Clone)]
+pub struct Transport<'a> {
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub payload: &'a [u8],
+}
+
+/// Parse a full Ethernet frame down to the XDP layer (IPv4/UDP only),
+/// keeping the transport coordinates.
+pub fn transport_of(record_data: &[u8]) -> crate::net::Result<Transport<'_>> {
     let frame = crate::net::parse_ethernet(record_data)?;
     if frame.ethertype != crate::net::ETHERTYPE_IPV4 {
         return Err(crate::net::NetError::Unsupported("non-IPv4 ethernet frame"));
@@ -559,7 +571,45 @@ pub fn udp_payload_of(record_data: &[u8]) -> crate::net::Result<&[u8]> {
         return Err(crate::net::NetError::Unsupported("non-UDP ip packet"));
     }
     let udp = crate::net::parse_udp(ip.payload)?;
-    Ok(udp.payload)
+    Ok(Transport {
+        src_ip: ip.src,
+        dst_ip: ip.dst,
+        src_port: udp.src_port,
+        dst_port: udp.dst_port,
+        payload: udp.payload,
+    })
+}
+
+/// Convenience: parse a full Ethernet frame down to the XDP layer, when the
+/// packet is IPv4/UDP. Returns the UDP payload (the XDP packet).
+pub fn udp_payload_of(record_data: &[u8]) -> crate::net::Result<&[u8]> {
+    Ok(transport_of(record_data)?.payload)
+}
+
+/// A heartbeat packet, surfaced as an event so replication/logging pipelines
+/// see the feed's liveness traffic exactly as a downstream consumer would
+/// (heartbeats do not increment the sequence number; XDP Common Spec 2.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heartbeat {
+    /// Feed channel the heartbeat arrived on (UDP destination port).
+    pub dst_port: u16,
+    pub src_port: u16,
+    /// Publisher-side timestamp (seconds since epoch + nanosecond offset).
+    pub send_time: u32,
+    pub send_time_ns: u32,
+    /// Sequence number carried by the heartbeat (next expected on the
+    /// channel; heartbeats themselves do not consume sequence numbers).
+    pub seq_num: u32,
+}
+
+impl fmt::Display for Heartbeat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Heartbeat ch{} seq {} t{}.{:09}",
+            self.dst_port, self.seq_num, self.send_time, self.send_time_ns
+        )
+    }
 }
 
 impl fmt::Display for Message<'_> {
@@ -669,8 +719,8 @@ impl PacketParser for XdpParser {
         packet: &'a [u8],
     ) -> std::result::Result<Vec<Event<'a>>, FeedError> {
         self.packets += 1;
-        let payload = match udp_payload_of(packet) {
-            Ok(p) => p,
+        let transport = match transport_of(packet) {
+            Ok(t) => t,
             // Captures may mix in frames without a feed payload (ARP, ...).
             Err(crate::net::NetError::Unsupported(_)) => {
                 self.non_feed_packets += 1;
@@ -678,10 +728,22 @@ impl PacketParser for XdpParser {
             }
             Err(e) => return Err(e.into()),
         };
-        let (hdr, msgs) = PacketHeader::parse(payload)?;
+        let (hdr, msgs) = PacketHeader::parse(transport.payload)?;
         *self.delivery.entry(hdr.delivery_flag).or_default() += 1;
 
         let mut events = Vec::new();
+        if hdr.delivery_flag == DELIVERY_HEARTBEAT {
+            // Surface liveness traffic as events: replication pipelines log
+            // heartbeats so downstream gap/staleness detection sees the
+            // same rhythm as on a live feed.
+            events.push(Event::XdpHeartbeat(Heartbeat {
+                dst_port: transport.dst_port,
+                src_port: transport.src_port,
+                send_time: hdr.send_time,
+                send_time_ns: hdr.send_time_ns,
+                seq_num: hdr.seq_num,
+            }));
+        }
         for m in msgs {
             let (mhdr, body) = m?;
             let msg = decode(mhdr, body)?;
