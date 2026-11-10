@@ -4,5 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod net;
 pub mod pcap;
+pub mod xdp;
 pub mod zstd;

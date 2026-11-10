@@ -2,7 +2,9 @@
 //! them. Built step by step on the standard library only; see README.md.
 
 use pcap_parser::pcap::{timestamp_string, GlobalHeader};
+use pcap_parser::xdp;
 use pcap_parser::zstd::frame;
+use std::collections::HashMap;
 use std::process::ExitCode;
 
 /// How many sample records to print.
@@ -49,7 +51,7 @@ fn main() -> ExitCode {
     println!("  snaplen: {} bytes", header.snaplen);
     println!("  link:    {}", header.network);
 
-    // Walk the packet records.
+    // Walk the packet records, dissecting the XDP payload on the way.
     let mut records = header.records(&decompressed);
     let mut count: u64 = 0;
     let mut captured_bytes: u64 = 0;
@@ -57,6 +59,13 @@ fn main() -> ExitCode {
     let mut first_ts: Option<(u32, u32)> = None;
     let mut last_ts: Option<(u32, u32)> = None;
     let mut samples: Vec<String> = Vec::new();
+
+    let mut xdp_packets: u64 = 0;
+    let mut other_frames: u64 = 0;
+    let mut xdp_messages: u64 = 0;
+    let mut delivery_hist: HashMap<u8, u64> = HashMap::new();
+    let mut type_hist: HashMap<u16, u64> = HashMap::new();
+    let mut sample_add_order: Option<String> = None;
     for rec in &mut records {
         let rec = match rec {
             Ok(r) => r,
@@ -82,6 +91,51 @@ fn main() -> ExitCode {
         wire_bytes += rec.header.orig_len as u64;
         first_ts.get_or_insert((rec.header.ts_sec, rec.header.ts_frac));
         last_ts = Some((rec.header.ts_sec, rec.header.ts_frac));
+
+        // XDP dissection (Ethernet -> VLAN -> IPv4 -> UDP -> XDP).
+        match xdp::udp_payload_of(rec.data) {
+            Ok(payload) => {
+                let (pkt, msgs) = match xdp::PacketHeader::parse(payload) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: XDP packet header at record {}: {e}", count + 1);
+                        return ExitCode::FAILURE;
+                    }
+                };
+                xdp_packets += 1;
+                *delivery_hist.entry(pkt.delivery_flag).or_default() += 1;
+                for m in msgs {
+                    let (hdr, body) = match m {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("error: XDP message at record {}: {e}", count + 1);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    let msg = match xdp::decode(hdr, body) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("error: XDP message decode at record {}: {e}", count + 1);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                    if sample_add_order.is_none() {
+                        if let xdp::Message::AddOrder { symbol_index, symbol_seq_num, price, volume, side, .. } = &msg
+                        {
+                            sample_add_order = Some(format!(
+                                "Add Order sym#{} seq {} price {} vol {} side {}",
+                                symbol_index, symbol_seq_num, price, volume,
+                                *side as char
+                            ));
+                        }
+                    }
+                    *type_hist.entry(msg.msg_type()).or_default() += 1;
+                    xdp_messages += 1;
+                }
+            }
+            Err(_) => other_frames += 1,
+        }
+
         count += 1;
     }
 
@@ -97,6 +151,33 @@ fn main() -> ExitCode {
     }
     for line in &samples {
         println!("{line}");
+    }
+
+    println!("xdp payload:");
+    println!(
+        "  packets:  {xdp_packets} ({other_frames} non-XDP frames)"
+    );
+    let mut flags: Vec<_> = delivery_hist.iter().collect();
+    flags.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    let flag_str = flags
+        .iter()
+        .map(|(f, n)| format!("{} {} ({})", n, xdp::delivery_name(**f), f))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("  delivery: {flag_str}");
+    println!("  messages: {xdp_messages}");
+    let mut types: Vec<_> = type_hist.iter().collect();
+    types.sort_by_key(|(t, _)| **t);
+    for (t, n) in types {
+        println!(
+            "    {:>5} {:<24} {}",
+            t,
+            xdp::msg_type_name(*t),
+            n
+        );
+    }
+    if let Some(s) = sample_add_order {
+        println!("  first market message: {s}");
     }
 
     if let Some(out_path) = args.get(1) {

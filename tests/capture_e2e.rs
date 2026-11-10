@@ -4,7 +4,9 @@
 //! test skips itself when the file is not present (e.g. fresh clone).
 
 use pcap_parser::pcap::{timestamp_string, GlobalHeader, LinkType, PcapMagic};
+use pcap_parser::xdp;
 use pcap_parser::zstd::frame;
+use std::collections::HashMap;
 
 const CAPTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -74,4 +76,95 @@ fn decompresses_real_capture_with_checksum() {
     let (last_sec, _) = last.unwrap();
     assert!(last_sec >= ts_sec);
     assert!(last_sec - ts_sec < 120, "unexpectedly large capture span");
+
+    // Pre-market (00:20 UTC): every packet in this file is an XDP
+    // heartbeat — 16-byte packet header, zero messages.
+    let h = GlobalHeader::parse(&out).unwrap();
+    let mut heartbeats = 0u64;
+    for rec in h.records(&out) {
+        let payload = xdp::udp_payload_of(rec.unwrap().data).unwrap();
+        let (pkt, mut msgs) = xdp::PacketHeader::parse(payload).unwrap();
+        assert_eq!(pkt.delivery_flag, xdp::DELIVERY_HEARTBEAT);
+        assert_eq!(pkt.num_msgs, 0);
+        assert!(msgs.next().is_none());
+        heartbeats += 1;
+    }
+    assert_eq!(heartbeats, count);
+}
+
+/// The market-hours capture (13:00-13:10 UTC) carries the full feed:
+/// original stream + refresh sequence + heartbeats on ~18 channels.
+#[test]
+fn dissects_market_hours_capture() {
+    const CAPTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/ny4-xase-pillar-b-20230822T130000.pcap.zst"
+    );
+    let raw = match std::fs::read(CAPTURE) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("skipping: {CAPTURE} not present");
+            return;
+        }
+    };
+    let out = frame::decompress(&raw).unwrap();
+    let header = GlobalHeader::parse(&out).unwrap();
+
+    let mut packets = 0u64;
+    let mut messages = 0u64;
+    let mut delivery: HashMap<u8, u64> = HashMap::new();
+    let mut types: HashMap<u16, u64> = HashMap::new();
+    let mut first_add_order: Option<u32> = None;
+    for rec in header.records(&out) {
+        let payload = xdp::udp_payload_of(rec.unwrap().data).unwrap();
+        let (pkt, msgs) = xdp::PacketHeader::parse(payload).unwrap();
+        assert_eq!(pkt.pkt_size as usize, payload.len());
+        *delivery.entry(pkt.delivery_flag).or_default() += 1;
+        let mut n = 0u8;
+        for m in msgs {
+            let (hdr, body) = m.unwrap();
+            let msg = xdp::decode(hdr, body).unwrap();
+            if first_add_order.is_none() {
+                if let xdp::Message::AddOrder { price, .. } = &msg {
+                    first_add_order = Some(*price);
+                }
+            }
+            *types.entry(msg.msg_type()).or_default() += 1;
+            n += 1;
+        }
+        assert_eq!(n, pkt.num_msgs);
+        messages += n as u64;
+        packets += 1;
+    }
+    assert_eq!(packets, 112_354);
+    assert_eq!(messages, 240_671);
+
+    // Delivery flags (values observed in this capture).
+    assert_eq!(delivery.get(&xdp::DELIVERY_HEARTBEAT), Some(&7_451));
+    assert_eq!(delivery.get(&xdp::DELIVERY_ORIGINAL), Some(&46_990));
+    assert_eq!(delivery.get(&xdp::DELIVERY_REFRESH_START), Some(&30));
+    assert_eq!(delivery.get(&xdp::DELIVERY_REFRESH_PART), Some(&57_853));
+    assert_eq!(delivery.get(&xdp::DELIVERY_REFRESH_END), Some(&30));
+
+    // Message types (values observed in this capture).
+    let expect: [(u16, u64); 12] = [
+        (xdp::msg_type::SOURCE_TIME_REFERENCE, 3_331),
+        (xdp::msg_type::SYMBOL_INDEX_MAPPING, 57_749),
+        (xdp::msg_type::SECURITY_STATUS, 57_750),
+        (xdp::msg_type::REFRESH_HEADER, 57_913),
+        (xdp::msg_type::ADD_ORDER, 24_337),
+        (xdp::msg_type::MODIFY_ORDER, 170),
+        (xdp::msg_type::DELETE_ORDER, 24_074),
+        (xdp::msg_type::ORDER_EXECUTION, 97),
+        (xdp::msg_type::REPLACE_ORDER, 7),
+        (xdp::msg_type::IMBALANCE, 2_407),
+        (xdp::msg_type::ADD_ORDER_REFRESH, 12_825),
+        (xdp::msg_type::NON_DISPLAYED_TRADE, 11),
+    ];
+    let total: u64 = expect.iter().map(|(_, n)| n).sum();
+    assert_eq!(total, messages);
+    for (t, n) in expect {
+        assert_eq!(types.get(&t), Some(&n), "type {t}");
+    }
+    assert!(first_add_order.is_some());
 }
