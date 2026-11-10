@@ -1,22 +1,63 @@
-//! pcap-parser CLI: decompresses zstd-compressed pcap captures and parses
-//! them. Built step by step on the standard library only; see README.md.
+//! pcap-parser CLI: decompresses zstd-compressed pcap captures, walks the
+//! records, and runs a selectable feed parser over every packet. The binary
+//! is a thin wrapper over the library pipeline; see README.md.
 
+use pcap_parser::feeds;
 use pcap_parser::pcap::{timestamp_string, GlobalHeader};
-use pcap_parser::xdp;
 use pcap_parser::zstd::frame;
-use std::collections::HashMap;
 use std::process::ExitCode;
 
 /// How many sample records to print.
 const SAMPLE_RECORDS: usize = 5;
 
+fn usage() -> ! {
+    eprintln!("usage: pcap-parser [--feed NAME] <capture.pcap.zst> [output]");
+    eprintln!("feeds: {}", feeds::PARSER_NAMES.join(", "));
+    std::process::exit(2);
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        eprintln!("usage: pcap-parser <capture.pcap.zst> [output]");
-        return ExitCode::from(2);
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut input: Option<&String> = None;
+    let mut output: Option<&String> = None;
+    let mut feed = String::from("xdp");
+    let mut it = argv.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--feed" => match it.next() {
+                Some(f) => feed = f.clone(),
+                None => usage(),
+            },
+            "--list-feeds" => {
+                for name in feeds::PARSER_NAMES {
+                    let p = feeds::parser_by_name(name).unwrap();
+                    println!("{name:<8} {}", p.describe());
+                }
+                return ExitCode::SUCCESS;
+            }
+            _ => {
+                if input.is_none() {
+                    input = Some(arg);
+                } else if output.is_none() {
+                    output = Some(arg);
+                } else {
+                    usage();
+                }
+            }
+        }
     }
-    let path = &args[0];
+    let path = match input {
+        Some(p) => p,
+        None => usage(),
+    };
+
+    let mut parser = match feeds::parser_by_name(&feed) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: unknown feed '{feed}' (available: {})", feeds::PARSER_NAMES.join(", "));
+            return ExitCode::FAILURE;
+        }
+    };
 
     let raw = match std::fs::read(path) {
         Ok(r) => r,
@@ -51,7 +92,8 @@ fn main() -> ExitCode {
     println!("  snaplen: {} bytes", header.snaplen);
     println!("  link:    {}", header.network);
 
-    // Walk the packet records, dissecting the XDP payload on the way.
+    // Walk the packet records, feeding each one through the feed parser.
+    parser.begin(&header);
     let mut records = header.records(&decompressed);
     let mut count: u64 = 0;
     let mut captured_bytes: u64 = 0;
@@ -59,13 +101,7 @@ fn main() -> ExitCode {
     let mut first_ts: Option<(u32, u32)> = None;
     let mut last_ts: Option<(u32, u32)> = None;
     let mut samples: Vec<String> = Vec::new();
-
-    let mut xdp_packets: u64 = 0;
-    let mut other_frames: u64 = 0;
-    let mut xdp_messages: u64 = 0;
-    let mut delivery_hist: HashMap<u8, u64> = HashMap::new();
-    let mut type_hist: HashMap<u16, u64> = HashMap::new();
-    let mut sample_add_order: Option<String> = None;
+    let mut events_seen: u64 = 0;
     for rec in &mut records {
         let rec = match rec {
             Ok(r) => r,
@@ -92,50 +128,13 @@ fn main() -> ExitCode {
         first_ts.get_or_insert((rec.header.ts_sec, rec.header.ts_frac));
         last_ts = Some((rec.header.ts_sec, rec.header.ts_frac));
 
-        // XDP dissection (Ethernet -> VLAN -> IPv4 -> UDP -> XDP).
-        match xdp::udp_payload_of(rec.data) {
-            Ok(payload) => {
-                let (pkt, msgs) = match xdp::PacketHeader::parse(payload) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("error: XDP packet header at record {}: {e}", count + 1);
-                        return ExitCode::FAILURE;
-                    }
-                };
-                xdp_packets += 1;
-                *delivery_hist.entry(pkt.delivery_flag).or_default() += 1;
-                for m in msgs {
-                    let (hdr, body) = match m {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("error: XDP message at record {}: {e}", count + 1);
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    let msg = match xdp::decode(hdr, body) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("error: XDP message decode at record {}: {e}", count + 1);
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    if sample_add_order.is_none() {
-                        if let xdp::Message::AddOrder { symbol_index, symbol_seq_num, price, volume, side, .. } = &msg
-                        {
-                            sample_add_order = Some(format!(
-                                "Add Order sym#{} seq {} price {} vol {} side {}",
-                                symbol_index, symbol_seq_num, price, volume,
-                                *side as char
-                            ));
-                        }
-                    }
-                    *type_hist.entry(msg.msg_type()).or_default() += 1;
-                    xdp_messages += 1;
-                }
+        match parser.parse_packet(rec.data) {
+            Ok(events) => events_seen += events.len() as u64,
+            Err(e) => {
+                eprintln!("error: {} failed at record {}: {e}", parser.name(), count + 1);
+                return ExitCode::FAILURE;
             }
-            Err(_) => other_frames += 1,
         }
-
         count += 1;
     }
 
@@ -153,34 +152,13 @@ fn main() -> ExitCode {
         println!("{line}");
     }
 
-    println!("xdp payload:");
-    println!(
-        "  packets:  {xdp_packets} ({other_frames} non-XDP frames)"
-    );
-    let mut flags: Vec<_> = delivery_hist.iter().collect();
-    flags.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-    let flag_str = flags
-        .iter()
-        .map(|(f, n)| format!("{} {} ({})", n, xdp::delivery_name(**f), f))
-        .collect::<Vec<_>>()
-        .join(", ");
-    println!("  delivery: {flag_str}");
-    println!("  messages: {xdp_messages}");
-    let mut types: Vec<_> = type_hist.iter().collect();
-    types.sort_by_key(|(t, _)| **t);
-    for (t, n) in types {
-        println!(
-            "    {:>5} {:<24} {}",
-            t,
-            xdp::msg_type_name(*t),
-            n
-        );
+    println!("feed: {} ({})", parser.name(), parser.describe());
+    if events_seen > 0 {
+        println!("  events: {events_seen}");
     }
-    if let Some(s) = sample_add_order {
-        println!("  first market message: {s}");
-    }
+    print!("{}", parser.summarize());
 
-    if let Some(out_path) = args.get(1) {
+    if let Some(out_path) = output {
         if let Err(e) = std::fs::write(out_path, &decompressed) {
             eprintln!("error: cannot write {out_path}: {e}");
             return ExitCode::FAILURE;

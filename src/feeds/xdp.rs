@@ -18,6 +18,15 @@
 //! Per the spec, price fields are integer numerators — the decimal point is
 //! `PriceScaleCode` decimal places from the symbol's Symbol Index Mapping
 //! message; prices are therefore kept raw here.
+//!
+//! Use this module through the [`crate::feeds::PacketParser`] seam
+//! ([`XdpParser`]) or call the free functions directly for lower-level
+//! control.
+
+use std::collections::HashMap;
+use std::fmt;
+
+use super::{Event, FeedError, PacketParser};
 
 /// Errors produced while decoding XDP structures.
 #[derive(Debug)]
@@ -550,6 +559,181 @@ pub fn udp_payload_of(record_data: &[u8]) -> crate::net::Result<&[u8]> {
     }
     let udp = crate::net::parse_udp(ip.payload)?;
     Ok(udp.payload)
+}
+
+impl fmt::Display for Message<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Message::SequenceNumberReset { source_time, source_time_ns, product_id, channel_id } => {
+                write!(f, "SeqReset t{source_time}.{source_time_ns:09} product {product_id} channel {channel_id}")
+            }
+            Message::SourceTimeReference { id, source_time } => {
+                write!(f, "TimeRef partition {id} second {source_time}")
+            }
+            Message::SymbolIndexMapping { symbol_index, symbol, market_id, price_scale_code, .. } => {
+                write!(f, "SymMap sym#{symbol_index} \"{symbol}\" market {market_id} scale {price_scale_code}")
+            }
+            Message::SecurityStatus { symbol_index, security_status, halt_condition, .. } => {
+                write!(
+                    f,
+                    "SecStatus sym#{symbol_index} status {} halt {}",
+                    *security_status as char, *halt_condition as char
+                )
+            }
+            Message::RefreshHeader { current_refresh_pkt, total_refresh_pkts, .. } => {
+                write!(f, "RefreshHdr pkt {current_refresh_pkt}/{}", total_refresh_pkts)
+            }
+            Message::AddOrder { symbol_index, symbol_seq_num, order_id, price, volume, side, firm_id, .. } => {
+                write!(
+                    f,
+                    "AddOrder sym#{symbol_index} seq {symbol_seq_num} order {order_id:016x} price {price} vol {volume} side {}{}",
+                    *side as char,
+                    if firm_id.is_empty() { String::new() } else { format!(" firm {firm_id}") }
+                )
+            }
+            Message::ModifyOrder { symbol_index, order_id, price, volume, side, .. } => {
+                write!(f, "ModifyOrder sym#{symbol_index} order {order_id:016x} price {price} vol {volume} side {}", *side as char)
+            }
+            Message::DeleteOrder { symbol_index, order_id, .. } => {
+                write!(f, "DeleteOrder sym#{symbol_index} order {order_id:016x}")
+            }
+            Message::Execution { symbol_index, order_id, trade_id, price, volume, printable, .. } => {
+                write!(
+                    f,
+                    "Execution sym#{symbol_index} order {order_id:016x} trade {trade_id} price {price} vol {volume} printable {printable}"
+                )
+            }
+            Message::ReplaceOrder { symbol_index, order_id, new_order_id, price, volume, side, .. } => {
+                write!(
+                    f,
+                    "ReplaceOrder sym#{symbol_index} order {order_id:016x} -> {new_order_id:016x} price {price} vol {volume} side {}",
+                    *side as char
+                )
+            }
+            Message::Imbalance { symbol_index, reference_price, paired_qty, .. } => {
+                write!(f, "Imbalance sym#{symbol_index} refprice {reference_price} paired {paired_qty}")
+            }
+            Message::AddOrderRefresh { symbol_index, order_id, price, volume, side, .. } => {
+                write!(
+                    f,
+                    "AddOrderRefresh sym#{symbol_index} order {order_id:016x} price {price} vol {volume} side {}",
+                    *side as char
+                )
+            }
+            Message::NonDisplayedTrade { symbol_index, trade_id, price, volume, printable, .. } => {
+                write!(
+                    f,
+                    "NonDisplayedTrade sym#{symbol_index} trade {trade_id} price {price} vol {volume} printable {printable}"
+                )
+            }
+            Message::Other { msg_type } => write!(f, "MsgType {msg_type}"),
+        }
+    }
+}
+
+/// [`PacketParser`] for NYSE XDP (Pillar Integrated Feed) captures.
+///
+/// Dissects Ethernet/VLAN/IPv4/UDP down to the XDP packet layer, decodes
+/// every message, and accumulates the per-capture statistics rendered by
+/// [`summarize`](PacketParser::summarize). Non-IP frames on the same capture
+/// are tolerated and counted as `non_feed_packets`; XDP-layer corruption is
+/// a hard error.
+#[derive(Debug, Default)]
+pub struct XdpParser {
+    /// XDP packets successfully parsed.
+    pub packets: u64,
+    /// Messages decoded across all packets.
+    pub messages: u64,
+    /// Frames that could not be dissected to a UDP payload (e.g. non-IP).
+    pub non_feed_packets: u64,
+    /// Packet count per DeliveryFlag value.
+    pub delivery: HashMap<u8, u64>,
+    /// Message count per message type.
+    pub types: HashMap<u16, u64>,
+    /// Rendered first Add Order message, if any was seen.
+    pub first_add_order: Option<String>,
+}
+
+impl PacketParser for XdpParser {
+    fn name(&self) -> &'static str {
+        "xdp"
+    }
+
+    fn describe(&self) -> &'static str {
+        "NYSE XDP (Pillar Integrated Feed)"
+    }
+
+    fn parse_packet<'a>(
+        &mut self,
+        packet: &'a [u8],
+    ) -> std::result::Result<Vec<Event<'a>>, FeedError> {
+        self.packets += 1;
+        let payload = match udp_payload_of(packet) {
+            Ok(p) => p,
+            // Captures may mix in frames without a feed payload (ARP, ...).
+            Err(crate::net::NetError::Unsupported(_)) => {
+                self.non_feed_packets += 1;
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let (hdr, msgs) = PacketHeader::parse(payload)?;
+        *self.delivery.entry(hdr.delivery_flag).or_default() += 1;
+
+        let mut events = Vec::new();
+        for m in msgs {
+            let (mhdr, body) = m?;
+            let msg = decode(mhdr, body)?;
+            if self.first_add_order.is_none() {
+                if let Message::AddOrder { symbol_index, symbol_seq_num, price, volume, side, .. } =
+                    &msg
+                {
+                    self.first_add_order = Some(format!(
+                        "Add Order sym#{symbol_index} seq {symbol_seq_num} price {price} vol {volume} side {}",
+                        *side as char
+                    ));
+                }
+            }
+            *self.types.entry(msg.msg_type()).or_default() += 1;
+            self.messages += 1;
+            events.push(Event::Xdp(msg));
+        }
+        Ok(events)
+    }
+
+    fn summarize(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "xdp payload (NYSE XDP — Pillar Integrated Feed):\n"
+        ));
+        out.push_str(&format!(
+            "  packets:  {} ({} non-feed frames)\n",
+            self.packets, self.non_feed_packets
+        ));
+        let mut flags: Vec<_> = self.delivery.iter().collect();
+        flags.sort_by_key(|(f, n)| (std::cmp::Reverse(**n), **f));
+        let flag_str = flags
+            .iter()
+            .map(|(f, n)| format!("{} {} ({})", n, delivery_name(**f), f))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("  delivery: {flag_str}\n"));
+        out.push_str(&format!("  messages: {}\n", self.messages));
+        let mut types: Vec<_> = self.types.iter().collect();
+        types.sort_by_key(|(t, _)| **t);
+        for (t, n) in types {
+            out.push_str(&format!(
+                "    {:>5} {:<24} {}\n",
+                t,
+                msg_type_name(*t),
+                n
+            ));
+        }
+        if let Some(s) = &self.first_add_order {
+            out.push_str(&format!("  first market message: {s}\n"));
+        }
+        out
+    }
 }
 
 #[cfg(test)]

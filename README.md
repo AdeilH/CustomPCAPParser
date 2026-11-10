@@ -16,6 +16,40 @@ Everything is implemented from scratch, following the relevant specifications:
   Execution/Replace/Imbalance/Refresh order messages). Ethernet/VLAN/IPv4/UDP
   dissection down to the XDP payload is included.
 
+## Library layout
+
+The crate is a library (`pcap_parser`) with a thin CLI on top. The pipeline
+is layered; each layer depends only on the ones above it, and the last one
+is pluggable:
+
+```text
+.zst file ──zstd──▶ pcap bytes ──pcap──▶ packet records ──feeds──▶ events
+            (from scratch)   (global hdr + records)   (pluggable parsers)
+```
+
+- `pcap_parser::zstd` — decompression
+- `pcap_parser::pcap` — global header, record iteration
+- `pcap_parser::net` — Ethernet/VLAN/IPv4/UDP dissection
+- `pcap_parser::feeds` — the seam where market-data protocols plug in:
+  implement the `PacketParser` trait, return your parser from
+  `feeds::parser_by_name`, and it composes with everything above (see the
+  crate docs for a complete working example)
+
+```sh
+cargo run --release -- --feed xdp data/ny4-xase-pillar-a-20230822T002000.pcap.zst
+cargo run --release -- --list-feeds
+```
+
+### Adding a feed module (e.g. NASDAQ ITCH)
+
+1. Create `src/feeds/itch.rs` with an `ItchParser` that implements
+   `feeds::PacketParser` (`name()` = `"itch"`, `parse_packet()` dissecting
+   the packet — reuse `net::` for transport, add an `Itch` variant to
+   `feeds::Event`).
+2. Register it in `feeds::parser_by_name` and `PARSER_NAMES`.
+3. Nothing above the feed layer changes: the zstd, pcap, and record
+   machinery stay untouched.
+
 ## Status / roadmap
 
 Work proceeds step by step, one commit per step:
@@ -31,9 +65,9 @@ Work proceeds step by step, one commit per step:
 9. [x] pcap: global header parsing (one capture, `data/`)
 10. [x] pcap: per-packet record headers
 11. [x] XDP: packet payload parsing
-12. [ ] Build as a library — restructure the crate so the parsing layers
-    (zstd, pcap, net, xdp) expose a clean public API for external consumers
-    (binary stays a thin wrapper). **Planned next; not started yet.**
+12. [x] Build as a library — layered public API with pluggable feed parsers
+    (`feeds::PacketParser`; XDP registered, ITCH/other feeds follow the
+    recipe above without touching the zstd/pcap layers)
 
 ## Usage
 

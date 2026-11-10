@@ -3,8 +3,9 @@
 //! `data/` holds ~3.8 GB of NYSE Pillar captures and is gitignored, so this
 //! test skips itself when the file is not present (e.g. fresh clone).
 
+use pcap_parser::feeds::{self, PacketParser};
 use pcap_parser::pcap::{timestamp_string, GlobalHeader, LinkType, PcapMagic};
-use pcap_parser::xdp;
+use pcap_parser::feeds::xdp;
 use pcap_parser::zstd::frame;
 use std::collections::HashMap;
 
@@ -167,4 +168,51 @@ fn dissects_market_hours_capture() {
         assert_eq!(types.get(&t), Some(&n), "type {t}");
     }
     assert!(first_add_order.is_some());
+}
+
+/// The pipeline exercised exactly the way an external consumer would:
+/// decompress -> parse pcap records -> run a registry-selected parser as a
+/// trait object, without knowing the concrete feed type.
+#[test]
+fn feed_pipeline_through_trait_object() {
+    const MARKET_CAPTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/ny4-xase-pillar-b-20230822T130000.pcap.zst"
+    );
+    let raw = match std::fs::read(MARKET_CAPTURE) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("skipping: {MARKET_CAPTURE} not present");
+            return;
+        }
+    };
+    let out = frame::decompress(&raw).unwrap();
+    let header = GlobalHeader::parse(&out).unwrap();
+
+    // Registry selection, run as `dyn PacketParser`.
+    let mut parser = feeds::parser_by_name("xdp").unwrap();
+    assert_eq!(parser.name(), "xdp");
+    parser.begin(&header);
+
+    let mut events = 0u64;
+    let mut records = 0u64;
+    for rec in header.records(&out) {
+        events += parser.parse_packet(rec.unwrap().data).unwrap().len() as u64;
+        records += 1;
+    }
+    assert_eq!(records, 112_354);
+    assert_eq!(events, 240_671); // every message surfaces as an event
+
+    let summary = parser.summarize();
+    assert!(summary.contains("packets:  112354 (0 non-feed frames)"), "{summary}");
+    assert!(summary.contains("messages: 240671"), "{summary}");
+    assert!(summary.contains("100 Add Order                24337"), "{summary}");
+    assert!(summary.contains("first market message:"), "{summary}");
+
+    // The "none" parser handles the same capture untouched.
+    let mut none = feeds::parser_by_name("none").unwrap();
+    for rec in header.records(&out) {
+        none.parse_packet(rec.unwrap().data).unwrap();
+    }
+    assert_eq!(none.summarize(), "packets: 112354");
 }
