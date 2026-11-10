@@ -720,6 +720,16 @@ impl PacketParser for XdpParser {
             .join(", ");
         out.push_str(&format!("  delivery: {flag_str}\n"));
         out.push_str(&format!("  messages: {}\n", self.messages));
+        if self.messages == 0
+            && self.packets > 0
+            && self.delivery.len() == 1
+            && self.delivery.contains_key(&DELIVERY_HEARTBEAT)
+        {
+            out.push_str(
+                "  note: capture contains only heartbeat packets — no market \
+                 messages were published in this time window\n",
+            );
+        }
         let mut types: Vec<_> = self.types.iter().collect();
         types.sort_by_key(|(t, _)| **t);
         for (t, n) in types {
@@ -956,6 +966,47 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    /// Wrap an XDP packet in Ethernet/IPv4/UDP, as on the wire.
+    fn build_frame(xdp: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + xdp.len();
+        let ip_total = 20 + udp_len;
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0x01, 0x00, 0x5e, 0x7d, 0x3b, 0xc3]); // dst
+        f.extend_from_slice(&[0xd4, 0xaf, 0xf7, 0xca, 0xe5, 0x05]); // src
+        f.extend_from_slice(&[0x08, 0x00]); // IPv4
+        f.extend_from_slice(&[0x45, 0x00]);
+        f.extend_from_slice(&(ip_total as u16).to_be_bytes());
+        f.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+        f.extend_from_slice(&[10, 0, 0, 1, 233, 125, 89, 195]);
+        f.extend_from_slice(&[0x5b, 0xcf, 0x5b, 0xcf]); // ports 23503
+        f.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        f.extend_from_slice(&[0, 0]); // checksum
+        f.extend_from_slice(xdp);
+        f
+    }
+
+    #[test]
+    fn heartbeat_only_capture_gets_an_explanation() {
+        // Pre-market captures are all heartbeats; summarize() should say so
+        // instead of reporting zero messages silently.
+        let p = build_frame(&build_packet(DELIVERY_HEARTBEAT, &[]));
+        let mut parser = XdpParser::default();
+        parser.parse_packet(&p).unwrap();
+        let summary = parser.summarize();
+        assert!(summary.contains("packets:  1 (0 non-feed frames)"), "{summary}");
+        assert!(summary.contains("messages: 0"), "{summary}");
+        assert!(
+            summary.contains("only heartbeat packets"),
+            "explanatory note missing: {summary}"
+        );
+        // ...but a capture with real messages does not get the note.
+        let msg = message(2, &[54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let p = build_frame(&build_packet(DELIVERY_ORIGINAL, &[msg]));
+        let mut parser = XdpParser::default();
+        parser.parse_packet(&p).unwrap();
+        assert!(!parser.summarize().contains("only heartbeat packets"));
     }
 
     #[test]
