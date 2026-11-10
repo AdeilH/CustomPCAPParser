@@ -606,7 +606,7 @@ impl fmt::Display for Heartbeat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Heartbeat ch{} seq {} t{}.{:09}",
+            "Heartbeat dst_port {} seq {} t {}.{:09}",
             self.dst_port, self.seq_num, self.send_time, self.send_time_ns
         )
     }
