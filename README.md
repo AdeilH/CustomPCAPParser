@@ -26,7 +26,7 @@ Work proceeds step by step, one commit per step:
 7. [x] zstd: sequences section + compressed blocks
 8. [x] zstd: end-to-end decompression, verified against `zstd` CLI + XXH64
 9. [x] pcap: global header parsing (one capture, `data/`)
-10. [ ] pcap: per-packet record headers
+10. [x] pcap: per-packet record headers
 11. [ ] XDP: packet payload parsing
 
 ## Usage
