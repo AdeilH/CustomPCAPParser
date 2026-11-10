@@ -44,6 +44,29 @@ pcap-parser = { git = "https://github.com/you/pcap-parser.git", branch = "main" 
 (MSRV ≈ 1.73. The name `pcap-parser` is taken on crates.io, so publishing
 publicly would require a rename.)
 
+## Sample captures
+
+The `data/` directory holds one trading day (2023-08-22) of NYSE American
+Pillar captures — public sample data hosted by [Databento]. Download and
+extract with:
+
+```sh
+mkdir -p data
+curl -L -C - -o ny4-xase-pillar-ab-20230822.zip \
+  https://sample-pcaps-dl.databento.com/xase/20230822/ny4-xase-pillar-ab-20230822.zip
+unzip ny4-xase-pillar-ab-20230822.zip -d data/
+rm ny4-xase-pillar-ab-20230822.zip   # optional; keep it to re-extract faster
+```
+
+This yields **242 files** (~4.1 GB compressed, ~4.06 GB decompressed), named
+`ny4-xase-pillar-{a,b}-20230822THHMMSS.pcap.zst` (10-minute rotations,
+00:00–24:00 UTC). The archive is flat — files land directly in `data/`.
+Pre-market windows (e.g. `T002000`) contain only heartbeat traffic; events
+start with the session (`T042000` onward). `curl -C -` resumes an
+interrupted download; `unzip -t <archive>` checks integrity if you want it.
+
+[Databento]: https://databento.com/datasets/XASE/PCAP
+
 A complete runnable consumer lives in [`examples/walkthrough.rs`](examples/walkthrough.rs):
 
 ```sh
@@ -229,8 +252,9 @@ cargo run --release -- --list-feeds
 cargo run --release -- data/capture.pcap.zst out.pcap      # also write decoded pcap
 ```
 
-Capture files in `data/` (~3.8 GB) are deliberately not tracked by git; the
-e2e tests skip themselves when they are absent.
+Capture files in `data/` are deliberately not tracked by git (see
+[Sample captures](#sample-captures) to download them); the e2e tests skip
+themselves when they are absent.
 
 ## Status / roadmap
 
