@@ -246,12 +246,13 @@ pub fn decode(header: MessageHeader, body: &[u8]) -> Result<Message<'_>> {
 
     let msg = match header.msg_type {
         msg_type::SEQ_NUMBER_RESET => {
-            need(14)?;
+            // MsgSize 14 includes the 4-byte header: the body is 10 bytes.
+            need(10)?;
             Message::SequenceNumberReset {
                 source_time: le32(&body[0..4]),
                 source_time_ns: le32(&body[4..8]),
-                product_id: body[12],
-                channel_id: body[13],
+                product_id: body[8],
+                channel_id: body[9],
             }
         }
         msg_type::SOURCE_TIME_REFERENCE => {
@@ -930,6 +931,31 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
         assert!(msgs.next().is_none());
+    }
+
+    #[test]
+    fn sequence_number_reset_decodes() {
+        // MsgSize 14 (header included): SourceTime, SourceTimeNS,
+        // ProductID, ChannelID. Regression test: this message appears in
+        // the pillar-a captures (session boundaries) and the decoder must
+        // not require the spec size twice.
+        let mut m = Vec::new();
+        m.extend_from_slice(&14u16.to_le_bytes());
+        m.extend_from_slice(&1u16.to_le_bytes());
+        m.extend_from_slice(&1_692_663_600u32.to_le_bytes());
+        m.extend_from_slice(&0u32.to_le_bytes());
+        m.push(1); // ProductID
+        m.push(8); // ChannelID
+        assert_eq!(m.len(), 14);
+        let hdr = MessageHeader { size: 14, msg_type: 1 };
+        match decode(hdr, &m[4..]).unwrap() {
+            Message::SequenceNumberReset { source_time, source_time_ns, product_id, channel_id } => {
+                assert_eq!(source_time, 1_692_663_600);
+                assert_eq!(source_time_ns, 0);
+                assert_eq!((product_id, channel_id), (1, 8));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
